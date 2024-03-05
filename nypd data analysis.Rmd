@@ -1,0 +1,164 @@
+---
+title: "NYPD Shooting Incident Data"
+output:
+  html_document: default
+  pdf_document: default
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+```
+
+Import NYPD shooting data and view first few rows
+```{r import-data, echo=FALSE}
+data_url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd_shooting_data <- read.csv(data_url)
+```
+
+Remove columns "X_COORD_CD", "Y_COORD_CD", "Latitude", "Longitude", and "Lon_Lat" and provide a summary of the data
+```{r clean-and-summarize, echo=FALSE}
+nypd_shooting_data <- nypd_shooting_data[ , !(names(nypd_shooting_data) %in% c("X_COORD_CD", "Y_COORD_CD", "Latitude", "Longitude", "Lon_Lat"))]
+# Turn the dates column into actual dates instead of strings
+nypd_shooting_data$OCCUR_DATE <- as.Date(nypd_shooting_data$OCCUR_DATE, format = "%m/%d/%Y")
+
+head(nypd_shooting_data)
+```
+
+Making a histogram of when in the year incidents occur, binned by month
+```{r month-histogram, echo=TRUE}
+# Extract month from OCCUR_DATE
+nypd_shooting_data$MONTH <- format(nypd_shooting_data$OCCUR_DATE, "%m")
+
+# Create a histogram with month as the bin
+ggplot(nypd_shooting_data, aes(x = MONTH)) +
+  geom_histogram(stat = "count", fill = "blue", color = "black") +
+  scale_x_discrete(limits = sprintf("%02d", 1:12), labels = month.abb) +
+  labs(title = "Histogram of Shootings by Month",
+       x = "Month",
+       y = "Count of Rows") +
+  theme_minimal()
+```
+
+Since July is shown as the peak month for shootings, I want to see which months have significantly fewer shootings. To do this, I use a simple z-test for proportions that uses the proportion of shootings in july/shootings that month. The output is a table showing p-values for each month.
+```{r time-of-year-model, echo=TRUE}
+# nypd_shooting_data$MONTH is already created with format(nypd_shooting_data$OCCUR_DATE, "%m") in the previous cell
+
+# Counting the number of shootings per month
+shootings_per_month <- nypd_shooting_data %>%
+  group_by(MONTH) %>%
+  summarise(Shootings = n()) %>%
+  mutate(Month_Name = month.abb[as.numeric(MONTH)])  # Convert numeric MONTH to abbreviated month names
+
+# grab shootings count for July
+july_shootings <- shootings_per_month$Shootings[shootings_per_month$Month_Name == "Jul"]
+
+# total shootings
+total_shootings <- sum(shootings_per_month$Shootings)
+
+# Define proportion of shootings for July
+july_proportion <- july_shootings / total_shootings
+
+# one-sample Z-tests for proportions comparing each month to July
+shootings_per_month$Z_test_p_value <- apply(shootings_per_month, 1, function(x) {
+  month_shootings <- as.numeric(x["Shootings"])
+  month_proportion <- month_shootings / total_shootings
+  
+  if (x["Month_Name"] == "Jul") {
+    return(1)  # No test needed for July itself. Return p-value of 1 for "not applicable"
+  } else {
+    # Calculate Z statistic for proportion difference
+    prop_diff <- month_proportion - july_proportion
+    standard_error <- sqrt(july_proportion * (1 - july_proportion) / total_shootings)
+    z_value <- prop_diff / standard_error
+    # Calculate and return p-value
+    return(pnorm(z_value))  # One-tailed test since we want to see if it's less than july
+  }
+})
+
+print(shootings_per_month[, c("Month_Name", "Shootings", "Z_test_p_value")])
+
+```
+
+
+Making histograms by age bucket to identify any association between perpetrator age group and victim age group
+```{r age-group-analysis, echo=TRUE}
+# Filter into valid age groups only
+valid_age_groups <- c("<18", "18-24", "25-44", "45-65", "65+")
+age_filtered_data <- nypd_shooting_data[
+  nypd_shooting_data$PERP_AGE_GROUP %in% valid_age_groups & 
+  nypd_shooting_data$VIC_AGE_GROUP %in% valid_age_groups, ]
+
+
+ggplot(age_filtered_data, aes(x = VIC_AGE_GROUP)) +
+  geom_histogram(stat = "count", fill = "blue", color = "black") +
+  facet_wrap(~ PERP_AGE_GROUP, scales = "free_y") +
+  scale_x_discrete(limits = valid_age_groups) +
+  labs(title = "Histograms of Victim Age Groups by Perpetrator Age Group",
+       x = "Victim Age Group",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+```
+
+Model to predict victim age based on perpetrator age.
+```{r age-group-model, echo=TRUE}
+# To build a model based on age, first need to convert age bracket strings to numeric.
+# This converts the values to numeric values based on age group mean (manually computed)
+# 18 is used for the <18 age group and 65 is used for the 65+ age group since there is no mean for an uncapped range
+nypd_shooting_data$PERP_AGE <- as.numeric(ifelse(nypd_shooting_data$PERP_AGE_GROUP == "<18", 18,
+                                                 ifelse(nypd_shooting_data$PERP_AGE_GROUP == "18-24", 21,
+                                                        ifelse(nypd_shooting_data$PERP_AGE_GROUP == "25-44", 34.5,
+                                                               ifelse(nypd_shooting_data$PERP_AGE_GROUP == "45-65", 55,
+                                                                      ifelse(nypd_shooting_data$PERP_AGE_GROUP == "65+", 65, NA))))))
+
+nypd_shooting_data$VIC_AGE <- as.numeric(ifelse(nypd_shooting_data$VIC_AGE_GROUP == "<18", 18,
+                                                ifelse(nypd_shooting_data$VIC_AGE_GROUP == "18-24", 21,
+                                                       ifelse(nypd_shooting_data$VIC_AGE_GROUP == "25-44", 34.5,
+                                                              ifelse(nypd_shooting_data$VIC_AGE_GROUP == "45-65", 55,
+                                                                     ifelse(nypd_shooting_data$VIC_AGE_GROUP == "65+", 65, NA))))))
+
+# Filter out rows with NA for PERP_AGE or VIC_AGE. Can only use numeric data
+nypd_shooting_data <- nypd_shooting_data %>% filter(!is.na(PERP_AGE) & !is.na(VIC_AGE))
+
+# Calculate mean victim age for each perpetrator age
+# Using summary metric of victim age as predictor for perp age group targets
+mean_victim_age_by_perp_age <- nypd_shooting_data %>%
+  group_by(PERP_AGE) %>%
+  summarise(Mean_Victim_Age = mean(VIC_AGE, na.rm = TRUE))
+
+# builds linear model for predicting victim age based on perpetrator age
+lm_model <- lm(Mean_Victim_Age ~ PERP_AGE, data = mean_victim_age_by_perp_age)
+
+# Plots linear model chart
+ggplot(mean_victim_age_by_perp_age, aes(x = PERP_AGE, y = Mean_Victim_Age)) +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ x, color = "blue") +
+  labs(title = "Predicted Mean Victim Age vs. Perpetrator Age",
+       x = "Perpetrator Age",
+       y = "Mean Victim Age") +
+  theme_minimal()
+
+# Prints summary of the model to inspect details
+print(summary(lm_model))
+```
+
+Conclusions:
+
+My two analyses above stratify shooting incidents by two variables that may inform some sociological basis for the incidents.
+
+To group by time, I generated a histogram binned by month. Interestingly, there seems to be a significantly higher number of shootings in the summer months than in winter. A possible explanation for this observation may simply arise from the weather. The winter months in New York can be quite cold so people are less likely to be out and about. This seems to suggest that the presence of face-to-face interaction increases odds of violent conflict. There is, however, much room for bias here. I make the (perhaps unjustified) assumption that shooting incidents arise from social interaction between people. It is also quite possible that having more people around increases convenience for violent crime that does not involve any sort of social situation. Regardless, it does seem valid to infer that shooting incidents follow weather patterns. It would be very interesting to have a day-to-day weather column to verify this claim by binning incidents by weather status (i.e. rainy/snowy/sunny).
+
+To quantify and model differences in shooting activity, I used my histogram visualization to identify the peak shooting month. I found this to be July. I used this as the basis to identify if all other months had a significantly lower number of shootings. This test was done using a z-test for proportions. Using a p-value of 0.05, only August failed to show a significantly lower number of shootings. This means that shooting activity is in fact lower outside of the summer months. This result could be used to encourage police forces to focus resources on increasing protective services during the summer months.
+
+The second stratification I present is a set of histograms comparing the age of victims to the ages of perpetrators of each incident. Unfortunately, there wasn't as strong of a trend as I thought there would be. This further demonstrates my internal bias that shooting incidents arise from social altercations. Among minor perpetrators, victims span all present age groups (there were no incidents reported with 45-65 year old victims). 18-24 year old perpetrators also seem to not show any significant targeting of their own age group. The final two age groups (25-44 and 65+) do seem to strongly target their own age groups more-so than the other groups. The data would benefit from comparison to population statistics for each age group. It might be interesting to see what percentage of citizens of New York belong in each age group.
+
+The model developed here predicts victim age based on perpetrator age. The result is a surprisingly strong correlation. This data could be used to focus development of preventative resources for resolving conflict. I am inferring here that the strong correlation reveals social connections between victims and perpetrators due to closeness in age. This is a strong source of bias, but if correct, preventative resources could focus on resolving conflicts between peers.
+
+```{r echo=FALSE}
+sessionInfo()
+```
